@@ -74,6 +74,7 @@
   <span id="mode">drag to orbit · scroll to zoom · hover a node</span>
   <button id="spin">spin</button>
   <button id="chains">show flow →</button>
+  <button id="export">export 2D ▤</button>
 </div>
 
 <div class="tip" id="tip"></div>
@@ -344,6 +345,73 @@ dom.addEventListener('wheel',e=>{e.preventDefault();
 
 document.getElementById('spin').onclick=e=>{spin=!spin;e.target.textContent=spin?'stop':'spin';};
 document.getElementById('chains').onclick=e=>{showChains=!showChains;e.target.textContent=showChains?'hide flow':'show flow →';document.getElementById('mode').textContent=showChains?'pulses travel base → tip in wiring order':'drag to orbit · scroll to zoom · hover a node';applyVis();};
+
+// ---------- 2D SVG export of the isolated board ----------
+function buildBoardSVG(b){
+  const COLS=10,NW=92,NH=58,GX=20,GY=46,MX=60,MY=150;
+  // print theme: black ink on white, roles by fill/outline not color
+  const INK='#000',DIM='#555',BG='#fff',PANEL='#fff',LINE='#999';
+  const B_PWR='#000',B_HEAD='#000',B_TERM='#000';
+  const chain=W.boards[b].slice().sort((a,c)=>a.c-c.c);
+  const N=chain.length, nrows=Math.ceil(N/COLS);
+  const width=MX*2+COLS*NW+(COLS-1)*GX, height=MY+nrows*(NH+GY)+60;
+  const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const cell=(i)=>{let row=(i/COLS)|0,col=i%COLS;if(row%2)col=COLS-1-col;
+    return {x:MX+col*(NW+GX),y:MY+row*(NH+GY),row,col};};
+  let S=[];
+  S.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="sans-serif">`);
+  S.push(`<defs><marker id="ah" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="${INK}"/></marker>`+
+         `<marker id="ahd" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="${DIM}"/></marker></defs>`);
+  S.push(`<rect width="${width}" height="${height}" fill="${BG}"/>`);
+  const seg={};chain.forEach(n=>seg[n.seg]=(seg[n.seg]||0)+1);
+  const segs=Object.keys(seg).sort((a,c)=>a-c).map(k=>seg[k]);
+  const slotHi=Math.max(...chain.map(n=>n.d+2));
+  S.push(`<rect x="${MX}" y="34" width="14" height="14" rx="3" fill="${INK}"/>`);
+  S.push(`<text x="${MX+24}" y="46" fill="${INK}" font-family="monospace" font-size="20" font-weight="600" letter-spacing="3">PARADIGM · BOARD ${b}</text>`);
+  S.push(`<text x="${MX}" y="74" fill="${DIM}" font-size="12.5">Universe ${b} · ${N} nodes · ${segs.length} data segments (${segs.join('+')}) · DMX slots 1–${slotHi} · 24V · flow: base → tip</text>`);
+  const lg=[['⏻ PWR',B_PWR,'power injection'],['▸ HEAD',B_HEAD,'segment driver in'],['▪ 120Ω',B_TERM,'terminator']];
+  let lx=MX;lg.forEach(([t,c,d])=>{S.push(`<text x="${lx}" y="98" fill="${c}" font-family="monospace" font-size="10">${t}</text>`);
+    S.push(`<text x="${lx+52}" y="98" fill="${DIM}" font-size="10">${d}</text>`);lx+=52+d.length*5.4+24;});
+  // connectors
+  for(let i=0;i<N-1;i++){const a=cell(i),z=cell(i+1);
+    const cy1=a.y+NH/2,cy2=z.y+NH/2;const same=chain[i].seg===chain[i+1].seg;const col=same?INK:DIM;const mk=same?'ah':'ahd';
+    let x1,y1,x2,y2;
+    if(a.row===z.row){ if(z.col>a.col){x1=a.x+NW;y1=cy1;x2=z.x;y2=cy2;}else{x1=a.x;y1=cy1;x2=z.x+NW;y2=cy2;} }
+    else{ x1=a.x+NW/2;y1=a.y+NH;x2=z.x+NW/2;y2=z.y; }
+    S.push(`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${col}" stroke-width="1.6" opacity="0.7" marker-end="url(#${mk})"/>`);
+  }
+  // cells
+  const seen=new Set();
+  chain.forEach((n,i)=>{const {x,y}=cell(i);
+    const special=n.inject||n.term||n.head;const stroke=special?INK:LINE;const sw=(n.inject||n.term)?2.4:(n.head?1.4:0.9);
+    S.push(`<rect x="${x}" y="${y}" width="${NW}" height="${NH}" rx="7" fill="${PANEL}" stroke="${stroke}" stroke-width="${sw}"/>`);
+    S.push(`<rect x="${x}" y="${y}" width="${NW}" height="4" rx="2" fill="${INK}" opacity="0.85"/>`);
+    S.push(`<text x="${x+NW/2}" y="${y+22}" text-anchor="middle" fill="${INK}" font-family="monospace" font-size="11" font-weight="600">${esc(n.label)}</text>`);
+    S.push(`<text x="${x+NW/2}" y="${y+36}" text-anchor="middle" fill="${DIM}" font-family="monospace" font-size="8.5">uid ${n.uid} · dmx ${n.d}</text>`);
+    const badges=[];if(n.inject)badges.push(['⏻ PWR',B_PWR,true]);if(n.head)badges.push(['▸ HEAD',B_HEAD,false]);if(n.term)badges.push(['▪ 120Ω',B_TERM,true]);
+    let bx=x+6;badges.forEach(([t,c,filled])=>{const bw=7+t.length*5;
+      if(filled){S.push(`<rect x="${bx}" y="${y+NH-16}" width="${bw.toFixed(0)}" height="12" rx="3" fill="${c}"/>`);
+        S.push(`<text x="${(bx+bw/2).toFixed(0)}" y="${y+NH-7}" text-anchor="middle" fill="${BG}" font-family="monospace" font-size="7" font-weight="600">${t}</text>`);}
+      else{S.push(`<rect x="${bx}" y="${y+NH-16}" width="${bw.toFixed(0)}" height="12" rx="3" fill="none" stroke="${c}" stroke-width="0.9"/>`);
+        S.push(`<text x="${(bx+bw/2).toFixed(0)}" y="${y+NH-7}" text-anchor="middle" fill="${c}" font-family="monospace" font-size="7" font-weight="600">${t}</text>`);}
+      bx+=bw+4;});
+    if(!seen.has(n.seg)){seen.add(n.seg);S.push(`<text x="${x+NW/2}" y="${y-22}" text-anchor="middle" fill="${DIM}" font-family="monospace" font-size="9" letter-spacing="1">SEG ${n.seg} ▸ 120Ω</text>`);}
+  });
+  const c0=cell(0);S.push(`<text x="${c0.x+NW/2}" y="${c0.y-8}" text-anchor="middle" fill="${INK}" font-family="monospace" font-size="10" font-weight="600">◉ BASE / DATA IN</text>`);
+  S.push('</svg>');
+  return S.join('\n');
+}
+document.getElementById('export').onclick=()=>{
+  const vis=boardVisible.map((v,i)=>v?i:-1).filter(i=>i>=0);
+  let target;
+  if(vis.length===1) target=vis[0];
+  else { alert('Isolate a single board first (click boards in the legend so only one is shown), then export.'); return; }
+  const svg=buildBoardSVG(target);
+  const blob=new Blob([svg],{type:'image/svg+xml'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download=`paradigm_board${target}.svg`;a.click();
+  URL.revokeObjectURL(url);
+};
 
 // ---------- hover pick ----------
 const ray=new THREE.Raycaster();ray.params.Points.threshold=0.12;
