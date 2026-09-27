@@ -21,7 +21,7 @@
   .brow.on{border-color:currentColor}
   .brow .sw{width:15px;height:15px;border-radius:4px;flex:none}
   .brow .nm{font-family:"IBM Plex Mono",monospace;font-size:12.5px;font-weight:600;color:var(--ink)}
-  .brow .rng{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim)}
+  .brow .rng{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--dim);text-align:right;line-height:1.45}
   .brow .eye{cursor:pointer;font-size:12px;width:14px;text-align:center}
   .mode{position:fixed;left:0;bottom:0;padding:14px 22px;display:flex;gap:8px;flex-wrap:wrap;z-index:2;align-items:center}
   .mode button{font:inherit;font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);
@@ -49,7 +49,10 @@
 </div>
 <div class="panel" id="boards"></div>
 <div class="hint" id="hint">pick a board · hover a node to see its number (→ N) · click to add it</div>
-<div class="mode">
+<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:3">
+  <div class="seg" id="taskSeg"><button data-t="wire" class="on">Wiring</button><button data-t="prog">Progress</button></div>
+</div>
+<div class="mode" id="wireTools">
   <div class="seg" id="modeSeg"><button data-m="build" class="on">manual</button><button data-m="ends">first–last</button><button data-m="orbit">orbit</button></div>
   <span id="countwrap" style="display:none;font-size:11.5px;color:var(--dim)">count <input id="count" inputmode="numeric" value="81" style="width:48px;font:inherit;font-family:'IBM Plex Mono',monospace;font-size:12px;text-align:center;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 4px"></span>
   <button id="trace" style="display:none;border-color:var(--b0);color:var(--b0)">trace ▸</button>
@@ -57,7 +60,23 @@
   <button id="clearb">clear board</button>
   <button id="nums">hide numbers</button>
   <button id="hub">hide cable-to-hub</button>
+  <button id="dmx">show DMX on hover</button>
   <button id="save">export .json</button>
+  <button id="load">load .json</button>
+  <input id="file" type="file" accept="application/json,.json" style="display:none">
+
+</div>
+<div class="mode" id="progTools" style="display:none">
+  <span style="font-size:11px;color:var(--dim)">mark as:</span>
+  <div class="seg" id="stateSeg">
+    <button data-s="1" style="color:#4bd6c4">wired</button>
+    <button data-s="2" class="on" style="color:#4bd67a">tested</button>
+    <button data-s="3" style="color:#ff6b6b">problem</button>
+    <button data-s="0" style="color:#8a8f9a">clear</button>
+  </div>
+  <button id="pSaveP">export progress</button>
+  <button id="pLoadP">load progress</button>
+  <input id="pfile" type="file" accept="application/json,.json" style="display:none">
 </div>
 <div class="status" id="status"></div>
 
@@ -89,8 +108,13 @@ UIDS.forEach((u,i)=>{const p=POS[u];pos[i*3]=p[0];pos[i*3+1]=p[1];pos[i*3+2]=p[2
 
 // state: per-node board (-1 none) and per-board ordered list of node indices
 const nodeBoard=new Int8Array(N).fill(-1);
+const nodeProg=new Int8Array(N).fill(0);   // 0 none, 1 wired, 2 tested, 3 problem
+let task='wire';                            // 'wire' | 'prog'
+let paintState=2;                           // which state a click applies: default 'tested'
+const PROG_COL=[new THREE.Color('#39424f'),new THREE.Color('#4bd6c4'),new THREE.Color('#4bd67a'),new THREE.Color('#ff6b6b')];
+const PROG_NAME=['—','wired','tested','problem'];
 const paths=[[],[],[],[]];           // paths[b] = ordered array of node indices
-let curBoard=0, mode='build', showNums=true, showHub=true;
+let curBoard=0, mode='build', showNums=true, showHub=true, showDmx=false;
 
 // dots
 const spr=(()=>{const s=64,cv=document.createElement('canvas');cv.width=cv.height=s;const g=cv.getContext('2d');const r=g.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);r.addColorStop(0,'#fff');r.addColorStop(.4,'#fff');r.addColorStop(1,'#0000');g.fillStyle=r;g.beginPath();g.arc(s/2,s/2,s/2,0,7);g.fill();return new THREE.CanvasTexture(cv);})();
@@ -164,7 +188,12 @@ function repaint(){
   for(let i=0;i<N;i++){
     const b=nodeBoard[i];
     let c;
-    if(b<0){ c=anyHidden?new THREE.Color('#12151b'):new THREE.Color('#39424f'); }
+    if(task==='prog'){
+      // progress task: color by state; dim nodes on hidden boards
+      if(b>=0 && !boardVisible[b]) c=new THREE.Color('#12151b');
+      else c=PROG_COL[nodeProg[i]];
+    }
+    else if(b<0){ c=anyHidden?new THREE.Color('#12151b'):new THREE.Color('#39424f'); }
     else if(!boardVisible[b]){ c=new THREE.Color('#12151b'); }
     else c=BCOL[b];
     cCol[i*3]=c.r;cCol[i*3+1]=c.g;cCol[i*3+2]=c.b;
@@ -212,10 +241,33 @@ buildBoards();
 
 function updateStatus(){
   let total=0;
+  // progress tallies
+  let pw=0,pt=0,pp=0;
+  for(let i=0;i<N;i++){ if(nodeProg[i]===1)pw++; else if(nodeProg[i]===2)pt++; else if(nodeProg[i]===3)pp++; }
   for(let b=0;b<4;b++){
     const arr=paths[b]; total+=arr.length;
     const el=document.getElementById('rng'+b);
-    if(el){ if(arr.length){ const s=globalNumber(b,0),e=globalNumber(b,arr.length-1); el.textContent=s+'–'+e+' ('+arr.length+'n · '+(arr.length*Wnode).toFixed(0)+'W)'; } else el.textContent='empty'; }
+    if(el){
+      if(task==='prog'){
+        // per-board progress
+        let w=0,t=0,p=0; arr.forEach(i=>{ if(nodeProg[i]===1)w++; else if(nodeProg[i]===2)t++; else if(nodeProg[i]===3)p++; });
+        const done=t, tot=arr.length;
+        el.innerHTML= tot? '<span style="color:#4bd67a">'+done+'</span>/'+tot+' tested'+
+          (w?' · <span style="color:#4bd6c4">'+w+' wired</span>':'')+(p?' · <span style="color:#ff6b6b">'+p+'⚠</span>':'') : 'empty';
+      } else if(arr.length){
+        const s=globalNumber(b,0),e=globalNumber(b,arr.length-1);
+        const dmxHi=arr.length*3;
+        const over=dmxHi>512;
+        el.innerHTML='#'+s+'–'+e+' · '+arr.length+'n · '+(arr.length*Wnode).toFixed(0)+'W<br>'+
+          '<span style="color:'+(over?'#ff6b6b':'var(--dim)')+'">U'+b+' · DMX 1–'+dmxHi+(over?' ⚠over 512':'')+'</span>';
+      } else el.textContent='empty';
+    }
+  }
+  if(task==='prog'){
+    document.getElementById('status').innerHTML=
+      '<span style="color:#4bd67a">'+pt+' tested</span> · <span style="color:#4bd6c4">'+pw+' wired</span> · <span style="color:#ff6b6b">'+pp+' problem</span><br>'+
+      (pt+' / '+N+' complete ('+(100*pt/N).toFixed(0)+'%)');
+    return;
   }
   document.getElementById('status').innerHTML=
     total+'/'+N+' placed'+(total<N?' · <span style="color:#ffd24b">'+(N-total)+' left</span>':' · <span style="color:#4bd67a">complete</span>')+
@@ -247,13 +299,31 @@ function addNode(i){
 const dom=renderer.domElement;
 let orbiting=false,px=0,py=0;
 dom.addEventListener('pointermove',e=>{
-  if(orbiting){ camTheta-=(e.clientX-px)*0.006; camPhi-=(e.clientY-py)*0.006; camPhi=Math.max(0.2,Math.min(Math.PI-0.2,camPhi)); px=e.clientX;py=e.clientY; placeCam(); return; }
-  if(mode==='build'){ const i=pick(e.clientX,e.clientY); hoverIdx=i;
-    if(i>=0){ hover.visible=true; hoverGeo.attributes.position.setXYZ(0,pos[i*3],pos[i*3+1],pos[i*3+2]); hoverGeo.attributes.position.needsUpdate=true; hover.material.color.set(BC[curBoard]); }
-    else hover.visible=false; }
-  else hoverIdx=-1;
+  if(progPainting){ applyProg(pick(e.clientX,e.clientY)); return; }
+  if(orbiting){ camTheta-=(e.clientX-px)*0.006; camPhi-=(e.clientY-py)*0.006; camPhi=Math.max(0.2,Math.min(Math.PI-0.2,camPhi)); px=e.clientX;py=e.clientY; placeCam(); hoverIdx=-1; hover.visible=false; return; }
+  // hover works in every mode (while not dragging) so you can inspect nodes, incl. DMX in orbit
+  const i=pick(e.clientX,e.clientY); hoverIdx=i;
+  if(i>=0){ hover.visible=true; hoverGeo.attributes.position.setXYZ(0,pos[i*3],pos[i*3+1],pos[i*3+2]); hoverGeo.attributes.position.needsUpdate=true;
+    // marker color: current board in build/ends, else the node's own board
+    const mc = (mode==='orbit' && nodeBoard[i]>=0) ? BC[nodeBoard[i]] : BC[curBoard];
+    hover.material.color.set(mc); }
+  else hover.visible=false;
 });
+let downX=0,downY=0, progPainting=false;
+function applyProg(i){
+  if(i<0) return;
+  const b=nodeBoard[i];
+  const blocked = (b<0 && boardVisible.some(v=>!v)) || (b>=0 && !boardVisible[b]);
+  if(!blocked && nodeProg[i]!==paintState){ nodeProg[i]=paintState; repaint(); }
+}
 dom.addEventListener('pointerdown',e=>{
+  downX=e.clientX; downY=e.clientY;
+  if(task==='prog'){
+    const i=pick(e.clientX,e.clientY);
+    if(i>=0){ progPainting=true; applyProg(i); }      // started on a node -> paint (and drag-paint)
+    else { orbiting=true; px=e.clientX; py=e.clientY; } // started on empty -> orbit
+    return;
+  }
   if(mode==='orbit'){ orbiting=true; px=e.clientX; py=e.clientY; return; }
   const i=pick(e.clientX,e.clientY); if(i<0) return;
   if(mode==='build'){ addNode(i); return; }
@@ -263,6 +333,15 @@ dom.addEventListener('pointerdown',e=>{
   updateEndMarkers();
 });
 function flashHint(t){ const h=document.getElementById('hint'); h.textContent=t; }
+document.getElementById('taskSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+  task=b.dataset.t; [...e.currentTarget.children].forEach(x=>x.classList.toggle('on',x===b));
+  document.getElementById('wireTools').style.display = task==='wire'?'flex':'none';
+  document.getElementById('progTools').style.display = task==='prog'?'flex':'none';
+  document.getElementById('hint').textContent = task==='prog'
+    ? 'Progress — pick a state above, then click nodes to mark them · isolate a board (eye) to focus · drag to orbit'
+    : 'Wiring — build the path';
+  hover.visible=false; endFirst=-1; endLast=-1; updateEndMarkers(); repaint();
+});
 function doTrace(){
   if(endFirst<0||endLast<0){ flashHint('pick a FIRST and LAST node first'); return; }
   const first=endFirst,last=endLast;
@@ -274,7 +353,7 @@ function doTrace(){
   paths[curBoard]=run; endFirst=-1; endLast=-1; updateEndMarkers(); repaint();
   flashHint('traced '+run.length+' nodes for Board '+curBoard);
 }
-addEventListener('pointerup',()=>orbiting=false);
+addEventListener('pointerup',()=>{ orbiting=false; progPainting=false; });
 dom.addEventListener('wheel',e=>{e.preventDefault();camR=Math.max(4,Math.min(18,camR+e.deltaY*0.004));placeCam();},{passive:false});
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
 
@@ -292,11 +371,33 @@ document.getElementById('modeSeg').addEventListener('click',e=>{const b=e.target
     mode==='build'?'manual · hover a node to see its number (→ N) · click to add it':
     mode==='ends'?'first–last · set count, click the FIRST node, then the LAST — it fills between':
     'drag to orbit · switch to a build mode to edit';});
+// progress export/import (keyed by uid so it survives path changes)
+document.getElementById('stateSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+  paintState=+b.dataset.s; [...e.currentTarget.children].forEach(x=>x.classList.toggle('on',x===b)); });
+document.getElementById('pSaveP').onclick=()=>{
+  const prog=[]; for(let i=0;i<N;i++){ if(nodeProg[i]) prog.push({uid:UIDS[i], state:PROG_NAME[nodeProg[i]]}); }
+  const data={project:'PARADIGM',kind:'wiring-progress',generated:new Date().toISOString(),
+    total:N, tested:prog.filter(p=>p.state==='tested').length, wired:prog.filter(p=>p.state==='wired').length,
+    problem:prog.filter(p=>p.state==='problem').length, progress:prog};
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='paradigm_progress.json';a.click();URL.revokeObjectURL(a.href);
+};
+document.getElementById('pLoadP').onclick=()=>document.getElementById('pfile').click();
+document.getElementById('pfile').onchange=(e)=>{
+  const f=e.target.files[0]; if(!f)return; const r=new FileReader();
+  r.onload=()=>{ try{ const d=JSON.parse(r.result); if(!d.progress)throw new Error('no progress');
+    nodeProg.fill(0); const idx={wired:1,tested:2,problem:3};
+    d.progress.forEach(p=>{ const i=uidIndex[p.uid]; if(i!=null) nodeProg[i]=idx[p.state]||0; });
+    repaint(); flashHint('loaded progress: '+d.progress.length+' nodes');
+  }catch(err){ alert('Could not load progress: '+err.message); } e.target.value=''; };
+  r.readAsText(f);
+};
 document.getElementById('trace').onclick=doTrace;
 document.getElementById('undo').onclick=()=>{ const arr=paths[curBoard]; if(arr.length){ const i=arr.pop(); nodeBoard[i]=-1; repaint(); } };
 document.getElementById('clearb').onclick=()=>{ paths[curBoard].forEach(i=>nodeBoard[i]=-1); paths[curBoard]=[]; repaint(); };
 document.getElementById('nums').onclick=(e)=>{ showNums=!showNums; e.target.textContent=showNums?'hide numbers':'show numbers'; };
 document.getElementById('hub').onclick=(e)=>{ showHub=!showHub; e.target.textContent=showHub?'hide cable-to-hub':'show cable-to-hub'; repaint(); };
+document.getElementById('dmx').onclick=(e)=>{ showDmx=!showDmx; e.target.textContent=showDmx?'hide DMX on hover':'show DMX on hover'; };
 document.getElementById('save').onclick=()=>{
   const assignment=[]; let num=0;
   for(let b=0;b<4;b++){ for(let k=0;k<paths[b].length;k++){ num++; assignment.push({number:num, uid:UIDS[paths[b][k]], board:b, order_in_board:k}); } }
@@ -306,6 +407,35 @@ document.getElementById('save').onclick=()=>{
     assignment};
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='paradigm_wiring_path.json';a.click();URL.revokeObjectURL(a.href);
+};
+document.getElementById('load').onclick=()=>document.getElementById('file').click();
+document.getElementById('file').onchange=(e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{
+    try{
+      const d=JSON.parse(r.result);
+      if(!d.assignment||!Array.isArray(d.assignment)) throw new Error('no assignment array');
+      // reset everything
+      nodeBoard.fill(-1); for(let b=0;b<4;b++) paths[b]=[];
+      endFirst=-1; endLast=-1;
+      // group by board, order by order_in_board (fallback to number)
+      const perBoard={0:[],1:[],2:[],3:[]};
+      d.assignment.forEach(a=>{ if(a.board>=0&&a.board<4&&uidIndex[a.uid]!=null){ perBoard[a.board].push(a); } });
+      let placed=0, missing=0;
+      for(let b=0;b<4;b++){
+        perBoard[b].sort((x,y)=>(x.order_in_board??x.number)-(y.order_in_board??y.number));
+        perBoard[b].forEach(a=>{ const i=uidIndex[a.uid];
+          if(i==null){ missing++; return; }
+          paths[b].push(i); nodeBoard[i]=b; placed++;
+        });
+      }
+      updateEndMarkers(); repaint();
+      flashHint('loaded '+placed+' nodes'+(missing?' ('+missing+' unknown skipped)':''));
+    }catch(err){ flashHint('could not read that file'); alert('Could not load: '+err.message); }
+    e.target.value='';   // allow re-loading the same file
+  };
+  r.readAsText(f);
 };
 
 // number labels (endpoints of each board + every ~Nth along current board, densely when soloed)
@@ -329,15 +459,26 @@ function labelSet(){
 const hoverLabel=document.createElement('div'); hoverLabel.className='numlabel'; hoverLabel.style.display='none';
 hoverLabel.style.fontSize='12px'; hoverLabel.style.fontWeight='600'; labelWrap.appendChild(hoverLabel);
 function updateHoverLabel(){
-  if(mode!=='build'||hoverIdx<0){ hoverLabel.style.display='none'; return; }
+  if(hoverIdx<0){ hoverLabel.style.display='none'; return; }
   const i=hoverIdx;
   // prospective number: if already on current board show its number, else it'd be appended
-  let num, col;
-  if(nodeBoard[i]===curBoard){ const k=paths[curBoard].indexOf(i); num=globalNumber(curBoard,k); col=BC[curBoard]; }
-  else { num=globalNumber(curBoard, paths[curBoard].length); col=BC[curBoard]; }
+  let num, col, kInBoard, boardForDmx;
+  if(nodeBoard[i]===curBoard){ kInBoard=paths[curBoard].indexOf(i); num=globalNumber(curBoard,kInBoard); col=BC[curBoard]; boardForDmx=curBoard; }
+  else if(nodeBoard[i]>=0){ boardForDmx=nodeBoard[i]; kInBoard=paths[boardForDmx].indexOf(i); num=globalNumber(boardForDmx,kInBoard); col=BC[boardForDmx]; }
+  else { kInBoard=paths[curBoard].length; num=globalNumber(curBoard, kInBoard); col=BC[curBoard]; boardForDmx=curBoard; }
   _v.set(pos[i*3],pos[i*3+1],pos[i*3+2]).project(camera);
   if(_v.z>1){ hoverLabel.style.display='none'; return; }
-  hoverLabel.style.display='block'; hoverLabel.textContent='→ '+num; hoverLabel.style.borderColor=col; hoverLabel.style.color='#fff';
+  hoverLabel.style.display='block'; hoverLabel.style.borderColor=col; hoverLabel.style.color='#fff';
+  const inspecting = (mode==='orbit');
+  const assigned = nodeBoard[i]>=0;
+  const prefix = inspecting ? '' : '→ ';        // no arrow when just inspecting
+  const dmxStart=kInBoard*3+1;
+  const dmxTxt = ' &nbsp;<span style="color:#8a8f9a">U'+boardForDmx+' · DMX '+dmxStart+'–'+(dmxStart+2)+'</span>';
+  // show DMX if toggled on, OR always when inspecting an already-assigned node in orbit
+  const withDmx = showDmx || (inspecting && assigned);
+  if(inspecting && !assigned){ hoverLabel.innerHTML='<span style="color:#8a8f9a">unassigned</span>'; }
+  else if(withDmx){ hoverLabel.innerHTML=prefix+num+dmxTxt; }
+  else hoverLabel.textContent=prefix+num;
   hoverLabel.style.left=((_v.x*0.5+0.5)*innerWidth)+'px'; hoverLabel.style.top=((-_v.y*0.5+0.5)*innerHeight-14)+'px';
 }
 function updateLabels(){
@@ -350,7 +491,15 @@ function updateLabels(){
     const {i,num,b}=set[j];
     _v.set(pos[i*3],pos[i*3+1],pos[i*3+2]).project(camera);
     if(_v.z>1){ el.style.display='none'; continue; }
-    el.style.display='block'; el.textContent=num; el.style.borderColor=BC[b];
+    el.style.display='block'; el.textContent=num;
+    if(task==='prog'){
+      const st=nodeProg[i];
+      const sc=['#39424f','#4bd6c4','#4bd67a','#ff6b6b'][st];
+      if(st===0){ el.style.background='#0e1116d0'; el.style.borderColor='#39424f'; el.style.color='#8a8f9a'; }
+      else { el.style.background=sc; el.style.borderColor=sc; el.style.color='#0e1116'; }  // filled box = its state
+    } else {
+      el.style.background='#0e1116d0'; el.style.borderColor=BC[b]; el.style.color='#fff';
+    }
     el.style.left=((_v.x*0.5+0.5)*innerWidth)+'px'; el.style.top=((-_v.y*0.5+0.5)*innerHeight)+'px';
   }
 }
